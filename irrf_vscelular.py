@@ -1,4 +1,4 @@
-import json
+mport json
 import re
 from pathlib import Path
 import streamlit as st
@@ -212,6 +212,9 @@ if "outras_deducoes_texto" not in st.session_state:
 # --- CABEÇALHO RESPONSIVO ---
 col_titulo, col_btn = st.columns([8, 2], vertical_alignment="center")
 with col_titulo:
+    st.markdown('')
+    st.markdown('')
+    st.markdown('')
     st.subheader(f"Calculadora IRRF ({ANO_VIGENCIA})")
 with col_btn:
     st.button("Limpar", icon=":material/refresh:",
