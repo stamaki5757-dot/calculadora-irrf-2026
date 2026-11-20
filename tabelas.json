@@ -1,0 +1,44 @@
+{
+  "ano_vigencia": 2026,
+  "constantes": {
+    "deducao_dependente": 189.59,
+    "desconto_simplificado": 607.20,
+    "isencao_65_anos": 1903.98,
+    "teto_rgps": 8475.55,
+    "contrib_teto_rgps": 988.09
+  },
+  "previdencia": {
+    "rgps": [
+      { "limite": 1621.00, "aliquota": 0.075, "deducao": 0.00 },
+      { "limite": 2902.84, "aliquota": 0.090, "deducao": 24.32 },
+      { "limite": 4354.27, "aliquota": 0.120, "deducao": 111.40 },
+      { "limite": 8475.55, "aliquota": 0.140, "deducao": 198.49 }
+    ],
+    "rpps_federal": [
+      { "limite": 1621.00, "aliquota": 0.075, "deducao": 0.00 },
+      { "limite": 2902.84, "aliquota": 0.090, "deducao": 24.32 },
+      { "limite": 4354.27, "aliquota": 0.120, "deducao": 111.40 },
+      { "limite": 8475.55, "aliquota": 0.140, "deducao": 198.49 },
+      { "limite": 14514.30, "aliquota": 0.145, "deducao": 240.86 },
+      { "limite": 29028.57, "aliquota": 0.165, "deducao": 531.15 },
+      { "limite": 56606.73, "aliquota": 0.190, "deducao": 1256.86 },
+      { "limite": null, "aliquota": 0.220, "deducao": 2955.04 }
+    ]
+  },
+  "irrf": {
+    "faixas": [
+      { "limite": 2428.80, "aliquota": 0.000, "deducao": 0.00 },
+      { "limite": 2826.65, "aliquota": 0.075, "deducao": 182.16 },
+      { "limite": 3751.05, "aliquota": 0.150, "deducao": 394.16 },
+      { "limite": 4664.68, "aliquota": 0.225, "deducao": 675.49 },
+      { "limite": null, "aliquota": 0.275, "deducao": 908.73 }
+    ],
+    "reducao_lei_15270": {
+      "limite_isencao_total": 5000.00,
+      "valor_reducao_total": 312.89,
+      "limite_reducao_gradual": 7350.00,
+      "formula_base": 978.62,
+      "formula_fator": 0.133145
+    }
+  }
+}
