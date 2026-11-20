@@ -89,7 +89,6 @@ def formatar_input_moeda(chave_estado: str):
         f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     )
 
-
 def resetar_campos():
     st.session_state.regime = "RGPS"
     st.session_state.aposentado = "não"
@@ -212,6 +211,8 @@ if "outras_deducoes_texto" not in st.session_state:
 # --- CABEÇALHO RESPONSIVO ---
 col_titulo, col_btn = st.columns([8, 2], vertical_alignment="center")
 with col_titulo:
+    st.markdown('')
+    st.markdown('')
     st.subheader(f"Calculadora IRRF ({ANO_VIGENCIA})")
 with col_btn:
     st.button("Limpar", icon=":material/refresh:",
