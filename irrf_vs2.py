@@ -1,14 +1,64 @@
+import json
+import re
+from pathlib import Path
 import streamlit as st
 
 st.set_page_config(
     page_title="IRRF - Imposto de Renda Retido na Fonte",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 
+# --- CARREGAMENTO DAS TABELAS EXTERNAS ---
+@st.cache_data
+def carregar_tabelas(caminho_arquivo: str = "tabelas.json") -> dict:
+    caminho = Path(__file__).parent / caminho_arquivo
+    with open(caminho, "r", encoding="utf-8") as f:
+        dados = json.load(f)
+
+    # Converte 'null' do JSON para float('inf') nas faixas sem teto
+    for regime in dados["previdencia"].values():
+        for faixa in regime:
+            if faixa["limite"] is None:
+                faixa["limite"] = float("inf")
+
+    for faixa in dados["irrf"]["faixas"]:
+        if faixa["limite"] is None:
+            faixa["limite"] = float("inf")
+
+    return dados
+
+
+TABELAS = carregar_tabelas()
+ANO_VIGENCIA = TABELAS["ano_vigencia"]
+CONST = TABELAS["constantes"]
+
+
+# --- FUNÇÕES AUXILIARES DE FORMATAÇÃO ---
 def formata_br(valor: float) -> str:
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def parse_moeda_br(texto: str) -> float:
+    limpo = re.sub(r"[^\d.,]", "", texto.strip())
+    if not limpo:
+        return 0.0
+    if "," in limpo:
+        limpo = limpo.replace(".", "").replace(",", ".")
+    elif limpo.count(".") > 1:
+        limpo = limpo.replace(".", "")
+    try:
+        return max(0.0, float(limpo))
+    except ValueError:
+        return 0.0
+
+
+def formatar_input_moeda(chave_estado: str):
+    valor = parse_moeda_br(st.session_state[chave_estado])
+    st.session_state[chave_estado] = (
+        f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    )
 
 
 def resetar_campos():
@@ -17,164 +67,243 @@ def resetar_campos():
     st.session_state.idade = "menor 65 anos"
     st.session_state.dependentes = 0
     st.session_state.rend_texto = "0,00"
+    st.session_state.outras_deducoes_texto = "0,00"
 
 
-col1, col2 = st.columns([18, 2])
-with col1:
-    st.subheader("IRRF - Imposto de Renda Retido na Fonte (2026)")
-with col2:
+# --- FUNÇÕES DE CÁLCULO (DINÂMICAS PELO JSON) ---
+def calc_previdencia_rgps(rend_bruto: float, is_aposentado: bool, tabelas: dict) -> float:
+    if is_aposentado or rend_bruto <= 0:
+        return 0.0
+
+    const = tabelas["constantes"]
+    if rend_bruto >= const["teto_rgps"]:
+        return const["contrib_teto_rgps"]
+
+    for faixa in tabelas["previdencia"]["rgps"]:
+        if rend_bruto <= faixa["limite"]:
+            return round((rend_bruto * faixa["aliquota"]) - faixa["deducao"], 2)
+    return 0.0
+
+
+def calc_previdencia_rpps(rend_bruto: float, is_aposentado: bool, tabelas: dict) -> float:
+    if rend_bruto <= 0:
+        return 0.0
+
+    const = tabelas["constantes"]
+    for faixa in tabelas["previdencia"]["rpps_federal"]:
+        if rend_bruto <= faixa["limite"]:
+            desconto = (rend_bruto * faixa["aliquota"]) - faixa["deducao"]
+            if is_aposentado:
+                desconto -= const["contrib_teto_rgps"]
+            return round(max(0.0, desconto), 2)
+    return 0.0
+
+
+def calc_irrf_detalhado(
+    rend_bruto: float,
+    contrib_prev: float,
+    num_dependentes: int,
+    outras_deducoes: float,
+    is_aposentado: bool,
+    is_maior_65: bool,
+    tabelas: dict,
+) -> dict:
+    if rend_bruto <= 0:
+        return {
+            "irrf_final": 0.0,
+            "rend_tributavel": 0.0,
+            "deducoes_legais_total": 0.0,
+            "deducao_aplicada": 0.0,
+            "tipo_deducao": "Nenhuma",
+            "base_calculo": 0.0,
+            "irrf_tabela": 0.0,
+            "reducao_lei": 0.0,
+        }
+
+    const = tabelas["constantes"]
+    regras_irrf = tabelas["irrf"]
+    regra_red = regras_irrf["reducao_lei_15270"]
+
+    isencao_etaria = const["isencao_65_anos"] if (is_aposentado and is_maior_65) else 0.0
+    rend_tributavel = max(0.0, rend_bruto - isencao_etaria)
+
+    deducoes_legais = (
+        contrib_prev + (const["deducao_dependente"] * num_dependentes) + outras_deducoes
+    )
+
+    if deducoes_legais >= const["desconto_simplificado"]:
+        deducao_aplicada = deducoes_legais
+        tipo_deducao = "Deduções Legais"
+    else:
+        deducao_aplicada = const["desconto_simplificado"]
+        tipo_deducao = "Desconto Simplificado"
+
+    base_calculo = max(0.0, rend_tributavel - deducao_aplicada)
+
+    irrf_tabela = 0.0
+    for faixa in regras_irrf["faixas"]:
+        if base_calculo <= faixa["limite"]:
+            irrf_tabela = max(0.0, (base_calculo * faixa["aliquota"]) - faixa["deducao"])
+            break
+
+    # Regra de isenção/redução gradual
+    if rend_tributavel <= regra_red["limite_isencao_total"]:
+        reducao_lei = regra_red["valor_reducao_total"]
+    elif rend_tributavel <= regra_red["limite_reducao_gradual"]:
+        reducao_lei = max(
+            0.0, regra_red["formula_base"] - (regra_red["formula_fator"] * rend_tributavel)
+        )
+    else:
+        reducao_lei = 0.0
+
+    irrf_final = round(max(0.0, irrf_tabela - reducao_lei), 2)
+
+    return {
+        "irrf_final": irrf_final,
+        "rend_tributavel": round(rend_tributavel, 2),
+        "deducoes_legais_total": round(deducoes_legais, 2),
+        "deducao_aplicada": round(deducao_aplicada, 2),
+        "tipo_deducao": tipo_deducao,
+        "base_calculo": round(base_calculo, 2),
+        "irrf_tabela": round(irrf_tabela, 2),
+        "reducao_lei": round(reducao_lei, 2),
+    }
+
+
+# --- INICIALIZAÇÃO DE ESTADO ---
+if "rend_texto" not in st.session_state:
+    st.session_state.rend_texto = "0,00"
+if "outras_deducoes_texto" not in st.session_state:
+    st.session_state.outras_deducoes_texto = "0,00"
+
+
+# --- INTERFACE ---
+col_titulo, col_btn = st.columns(2, vertical_alignment="center")
+with col_titulo:
+    st.subheader(f"IRRF - Imposto de Renda Retido na Fonte ({ANO_VIGENCIA})")
+with col_btn:
     st.button("Limpar", icon=":material/refresh:", on_click=resetar_campos, use_container_width=True)
 
-col1, col2, col3, col4, col5 = st.columns(5)
+c1, c2, c3, c4, c5 = st.columns(5)
 
-with col1:
-    regime = st.selectbox("Regime :", ["RGPS", "RPPS Federal"], key="regime")
-with col2:
-    aposentado = st.selectbox("Aposentado :", ["não", "sim"], key="aposentado")
-with col3:
-    idade = st.selectbox("Faixa etária :", ["menor 65 anos", "maior 65 anos"], key="idade")
-with col4:
+with c1:
+    regime = st.selectbox("Regime:", ["RGPS", "RPPS Federal"], key="regime")
+with c2:
+    aposentado = st.selectbox("Aposentado:", ["não", "sim"], key="aposentado")
+with c3:
+    idade = st.selectbox(
+        "Faixa etária:",
+        ["menor 65 anos", "maior 65 anos"],
+        key="idade",
+        disabled=(aposentado == "não"),
+    )
+with c4:
     dependente_quant = st.number_input(
         "Número dependentes:", min_value=0, max_value=30, value=0, step=1, key="dependentes"
     )
-with col5:
-    if "rend_texto" not in st.session_state:
-        st.session_state.rend_texto = "0,00"
+with c5:
+    st.text_input(
+        "Rendimento bruto (R$):",
+        key="rend_texto",
+        on_change=formatar_input_moeda,
+        args=("rend_texto",),
+    )
 
-    def formatar_moeda():
-        texto_usuario = st.session_state.rend_texto
-        try:
-            texto_limpo = texto_usuario.replace(".", "").replace(",", ".")
-            valor_float = max(0.0, float(texto_limpo))
-            texto_formatado = (
-                f"{valor_float:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            )
-            st.session_state.rend_texto = texto_formatado
-        except ValueError:
-            pass
-
-    st.text_input("Rendimento bruto:", key="rend_texto", on_change=formatar_moeda)
-
-    try:
-        rend_bruto = max(
-            0.0, float(st.session_state.rend_texto.replace(".", "").replace(",", "."))
+# --- CAMPO OPCIONAL: OUTRAS DEDUÇÕES ---
+tem_outras_deducoes = parse_moeda_br(st.session_state.outras_deducoes_texto) > 0
+with st.expander("Outras deduções legais (opcional)", expanded=tem_outras_deducoes):
+    col_ded1, col_ded2 = st.columns(2, vertical_alignment="center")
+    with col_ded1:
+        st.text_input(
+            "Valor total (R$):",
+            key="outras_deducoes_texto",
+            on_change=formatar_input_moeda,
+            args=("outras_deducoes_texto",),
+            help="Informe valores mensais dedutíveis na fonte, como pensão alimentícia judicial ou previdência complementar (PGBL/Funpresp).",
         )
-    except ValueError:
-        rend_bruto = 0.0
+    with col_ded2:
+        st.caption(
+            "Inclua aqui descontos mensais permitidos pela Receita Federal na base de cálculo do IRRF, "
+            "como **pensão alimentícia** decorrente de decisão judicial/escritura pública ou contribuições à **previdência complementar**."
+        )
 
-
-def contrib_prev_rgps(rend_bruto: float) -> float:
-    faixas = [
-        (1621.00, 0.075, 0.0),
-        (2902.84, 0.09, 24.32),
-        (4354.27, 0.12, 111.40),
-        (8475.55, 0.14, 198.49),
-    ]
-    teto_prev = 8475.55
-    if aposentado == "sim" or rend_bruto <= 0:
-        return 0.00
-    if rend_bruto >= teto_prev:
-        return round(teto_prev * 0.14 - 198.49, 2)
-
-    contrib_prev = 0.0
-    for limite, aliquota, deducao in faixas:
-        if rend_bruto <= limite:
-            contrib_prev = (rend_bruto * aliquota) - deducao
-            break
-    return round(contrib_prev, 2)
-
-
-def contrib_prev_rpps(rend_bruto: float) -> float:
-    if rend_bruto <= 0:
-        return 0.00
-    faixas = [
-        (1621.00, 0.075, 0.0),
-        (2902.84, 0.09, 24.32),
-        (4354.27, 0.12, 111.40),
-        (8475.55, 0.14, 198.49),
-        (14514.30, 0.145, 240.86),
-        (29028.57, 0.165, 531.15),
-        (56606.73, 0.19, 1256.86),
-        (float("inf"), 0.22, 2955.04),
-    ]
-    contrib_prev_teto = 988.09
-    contrib_prev = 0.0
-    for limite, aliquota, deducao in faixas:
-        if rend_bruto <= limite:
-            if aposentado == "sim":
-                contrib_prev = max(0.00, (rend_bruto * aliquota) - deducao - contrib_prev_teto)
-            else:
-                contrib_prev = max(0.00, (rend_bruto * aliquota) - deducao)
-            break
-    return round(contrib_prev, 2)
-
+# --- EXECUÇÃO DOS CÁLCULOS ---
+rend_bruto = parse_moeda_br(st.session_state.rend_texto)
+outras_deducoes = parse_moeda_br(st.session_state.outras_deducoes_texto)
+is_aposentado = aposentado == "sim"
+is_maior_65 = idade == "maior 65 anos"
 
 contrib_prev = (
-    contrib_prev_rgps(rend_bruto) if regime == "RGPS" else contrib_prev_rpps(rend_bruto)
+    calc_previdencia_rgps(rend_bruto, is_aposentado, TABELAS)
+    if regime == "RGPS"
+    else calc_previdencia_rpps(rend_bruto, is_aposentado, TABELAS)
 )
 
+resultado = calc_irrf_detalhado(
+    rend_bruto=rend_bruto,
+    contrib_prev=contrib_prev,
+    num_dependentes=dependente_quant,
+    outras_deducoes=outras_deducoes,
+    is_aposentado=is_aposentado,
+    is_maior_65=is_maior_65,
+    tabelas=TABELAS,
+)
 
-def calc_irrf(rend_bruto: float) -> float:
-    if rend_bruto <= 0:
-        return 0.00
-
-    faixas = [
-        (2428.80, 0.0, 0.0),
-        (2826.65, 0.075, 182.16),
-        (3751.05, 0.15, 394.16),
-        (4664.68, 0.225, 675.49),
-        (float("inf"), 0.275, 908.73),
-    ]
-
-    if aposentado == "sim" and idade == "maior 65 anos":
-        rend_tributavel = max(0.0, rend_bruto - 1903.98)
-    else:
-        rend_tributavel = rend_bruto
-
-    desc_simpl = 607.20
-    dependente_vr = 189.59
-    deducoes_legais = contrib_prev + (dependente_vr * dependente_quant)
-
-    base_calc = max(0.0, rend_tributavel - max(deducoes_legais, desc_simpl))
-
-    irrf_bruto = 0.0
-    for limite, aliquota, deducao in faixas:
-        if base_calc <= limite:
-            irrf_bruto = max(0.0, (base_calc * aliquota) - deducao)
-            break
-
-    if rend_tributavel <= 5000.00:
-        reducao = 312.89
-    elif rend_tributavel <= 7350.00:
-        reducao = 978.62 - (0.133145 * rend_tributavel)
-    else:
-        reducao = 0.0
-
-    irrf_final = max(0.0, irrf_bruto - reducao)
-    return round(irrf_final, 2)
-
-
-st.markdown("___")
-
-deducao_dep = dependente_quant * 189.59
-irrf_valor = calc_irrf(rend_bruto)
+irrf_valor = resultado["irrf_final"]
+deducao_dep = dependente_quant * CONST["deducao_dependente"]
 liquido = max(0.0, rend_bruto - contrib_prev - irrf_valor)
+aliquota_efetiva = (irrf_valor / rend_bruto * 100) if rend_bruto > 0 else 0.0
 
+st.divider()
+
+# --- EXIBIÇÃO DOS RESULTADOS ---
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Rendimento Bruto", formata_br(rend_bruto))
-m2.metric("Previdência", formata_br(contrib_prev))
-m3.metric("Dedução Dependentes", formata_br(deducao_dep))
-m4.metric("IRRF Retido", formata_br(irrf_valor))
+m2.metric("Previdência", formata_br(contrib_prev), delta=regime, delta_color="off")
+m3.metric(
+    "Dedução Dependentes",
+    formata_br(deducao_dep),
+    delta=f"+ {formata_br(outras_deducoes)} outras" if outras_deducoes > 0 else None,
+    delta_color="off",
+)
+m4.metric(
+    "IRRF Retido",
+    formata_br(irrf_valor),
+    delta=f"Alíquota efetiva: {aliquota_efetiva:.2f}%" if rend_bruto > 0 else None,
+    delta_color="inverse" if irrf_valor > 0 else "off",
+)
 m5.metric("Rendimento Líquido", formata_br(liquido))
+
+# --- MEMÓRIA DE CÁLCULO ---
+if rend_bruto > 0:
+    with st.expander("Ver memória de cálculo detalhada"):
+        d1, d2, d3, d4 = st.columns(4)
+        d1.write(f"**Rendimento Tributável:**\n{formata_br(resultado['rend_tributavel'])}")
+        d2.write(
+            f"**Dedução Aplicada ({resultado['tipo_deducao']}):**\n"
+            f"- {formata_br(resultado['deducao_aplicada'])} *(Legais: {formata_br(resultado['deducoes_legais_total'])})*"
+        )
+        d3.write(f"**Base de Cálculo IRRF:**\n{formata_br(resultado['base_calculo'])}")
+        d4.write(
+            f"**Redução Lei nº 15.270/2025:**\n"
+            f"- {formata_br(resultado['reducao_lei'])} *(Tabela: {formata_br(resultado['irrf_tabela'])})*"
+        )
+        if outras_deducoes > 0:
+            st.caption(
+                "*Nota: O Rendimento Líquido exibido acima considera apenas os descontos obrigatórios de Previdência e IRRF, "
+                "sem subtrair o valor informado em Outras Deduções.*"
+            )
+
+
 
 st.divider()
 st.caption(
-    """
-    **Aviso Legal (Disclaimer):** Esta ferramenta tem caráter estritamente informativo e educacional, 
-    baseada nas tabelas progressivas, limites previdenciários e regras de isenção/redução do IRRF vigentes em 2026 
-    (Lei nº 15.270/2025 e normas da Receita Federal). Os resultados são simulações estimadas e podem variar conforme 
-    rubricas específicas do seu contracheque (como verbas indenizatórias, previdência complementar, pensão alimentícia 
-    ou dependentes). Esta calculadora não substitui o cálculo oficial do departamento pessoal/órgão pagador nem a 
-    orientação de um contador. **Privacidade:** Nenhum dado financeiro inserido nesta página é armazenado ou compartilhado.
-    """
+f"""
+Aviso Legal (Disclaimer): Esta ferramenta tem caráter estritamente informativo e educacional,
+baseada nas tabelas progressivas, limites previdenciários e regras de isenção/redução do IRRF vigentes em {ANO_VIGENCIA}
+(Lei nº 15.270/2025 e normas da Receita Federal). Os resultados são simulações estimadas e podem variar conforme
+rubricas específicas do seu contracheque (como verbas indenizatórias, previdência complementar, pensão alimentícia
+ou dependentes). Esta calculadora não substitui o cálculo oficial do departamento pessoal/órgão pagador nem a
+orientação de um contador. Privacidade: Nenhum dado financeiro inserido nesta página é armazenado ou compartilhado.
+"""
 )
