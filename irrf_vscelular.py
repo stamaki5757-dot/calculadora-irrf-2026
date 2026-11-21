@@ -3,6 +3,19 @@ import re
 from pathlib import Path
 import streamlit as st
 
+
+st.markdown(
+    """
+<style>
+[data-testid="stMetricValue"] {
+    font-size: 20px; /* Ajuste para o tamanho desejado, ex: 16px, 20px, 24px */
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+
 st.set_page_config(
     page_title="IRRF - Imposto de Renda Retido na Fonte",
     layout="wide",
@@ -66,8 +79,7 @@ CONST = TABELAS["constantes"]
 
 # --- FUNÇÕES AUXILIARES DE FORMATAÇÃO ---
 def formata_br(valor: float) -> str:
-    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
+  return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def parse_moeda_br(texto: str) -> float:
     limpo = re.sub(r"[^\d.,]", "", texto.strip())
